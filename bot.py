@@ -194,8 +194,14 @@ class StarTeamTalkBot:
                     raise RuntimeError("Connection lost during login")
                 elif ev == int(sdk.ClientEvent.CLIENTEVENT_CMD_ERROR):
                     code = getattr(m, "nError", 0)
-                    msg = sdk.getErrorMessage(code) if hasattr(sdk, "getErrorMessage") else ""
-                    log.error("Server error during login: code %s %s", code, msg)
+                    # TeamTalk error code 0 == CMDERR_SUCCESS == no error.
+                    # The server routinely sends this as a routine ACK during
+                    # login; only non-zero codes are real failures.
+                    if code != 0:
+                        msg = sdk.getErrorMessage(code) if hasattr(sdk, "getErrorMessage") else ""
+                        log.error("Server error during login: code %s %s", code, msg)
+                    else:
+                        log.debug("Server login ACK (code 0 = success).")
                 if logged_in and (self.tt.getRootChannelID() > 0 or len(self._channel_tree) >= 1):
                     grace_end = time.time() + 1.5
                     while time.time() < grace_end:
@@ -211,23 +217,32 @@ class StarTeamTalkBot:
                           "(account may already be logged in elsewhere)")
 
     def _wait_login_error(self, wait_s):
-        """Pump briefly for a CLIENTEVENT_CMD_ERROR and return (code, msg) or None."""
+        """Pump briefly for a real login failure (CLIENTEVENT_CMD_ERROR with a
+        non-zero error code) and return (code, msg) or None.
+
+        TeamTalk error code 0 == CMDERR_SUCCESS, so a code-0 CMD_ERROR is a
+        routine success ACK, NOT a failure -- we ignore it and keep looking
+        (or return None if nothing else arrives).
+        """
         import time
         end = time.time() + wait_s
         while time.time() < end:
             m = self.tt.getMessage(200)
             if not m:
                 continue
+            if m.nClientEvent == CLIENTEVENT_CON_LOST:
+                raise RuntimeError("Connection lost during login")
             if m.nClientEvent == int(sdk.ClientEvent.CLIENTEVENT_CMD_ERROR):
                 code = getattr(m, "nError", 0)
+                if code == 0:
+                    # success ACK, not an error -- ignore and keep pumping
+                    continue
                 msg = ""
                 try:
                     msg = sdk.getErrorMessage(code)
                 except Exception:
                     pass
                 return (code, msg)
-            if m.nClientEvent == CLIENTEVENT_CON_LOST:
-                raise RuntimeError("Connection lost during login")
         return None
 
     def _join_channel(self):
