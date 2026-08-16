@@ -206,16 +206,30 @@ class StarTeamTalkBot:
                 log.warning("doLogin False but no server error event within 3s; retrying...")
                 time.sleep(3)
                 continue
-            log.info("doLogin() accepted (attempt %d); pumping for confirmation...", do_login_calls)
+            log.info("doLogin() accepted (attempt %d); confirming login + gathering channel tree...", do_login_calls)
             _note(0, "doLogin accepted")
-            # login command accepted; pump until confirmed + channel tree received
+            # Pump events to collect the channel tree, but the AUTHORITATIVE
+            # "are we logged in" signal is getMyUserID() != 0 -- not the
+            # MYSELF_LOGGEDIN event (which can arrive before we start pumping
+            # or get coalesced and missed). Poll that every iteration.
             end = time.time() + 12
             while time.time() < end:
+                if self.tt.getMyUserID() != 0:
+                    logged_in = True
+                    _note(999, "getMyUserID != 0 -> confirmed")
+                    if self.status:
+                        try:
+                            self.tt.doChangeStatus(UserStatusMode.ONLINE, self.status)
+                            log.info("Set bot status message.")
+                        except Exception as e:
+                            log.warning("Could not set status message: %s", e)
+                    break
                 m = self.tt.getMessage(200)
                 if not m:
                     continue
                 ev = m.nClientEvent
                 if ev == CLIENTEVENT_CMD_MYSELF_LOGGEDIN:
+                    # event seen too -- reinforce, but getMyUserID is the decider
                     logged_in = True
                     _note(ev, "MYSELF_LOGGEDIN")
                     log.info("Received MYSELF_LOGGEDIN event.")
@@ -256,7 +270,7 @@ class StarTeamTalkBot:
                     return
             if logged_in:
                 return
-            _note(-2, "doLogin accepted but no confirmation in 12s")
+            _note(-2, "doLogin accepted but getMyUserID stayed 0 in 12s")
             # login command accepted but no confirmation; loop will retry
         # ---- timeout: emit a full diagnostic so the failure is never silent ----
         diag = (
