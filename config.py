@@ -6,9 +6,9 @@ placeholder ("troll") -- never commit a real account password. Override it via
 the STAR_TT_PASSWORD environment variable or a gitignored config.local.py.
 
 Environment variables (all optional; sensible placeholders provided):
-  STAR_TT_HOST        TeamTalk server hostname        (default: tt-server.com)
-  STAR_TT_TCP_PORT    TeamTalk TCP port               (default: 10443)
-  STAR_TT_UDP_PORT    TeamTalk UDP port               (default: 10443)
+  STAR_TT_HOST        TeamTalk server hostname        (default: tunmi13.com)
+  STAR_TT_TCP_PORT    TeamTalk TCP port               (default: 9483)
+  STAR_TT_UDP_PORT    TeamTalk UDP port               (default: 9483)
   STAR_TT_NICKNAME    Bot display nickname            (default: starbot)
   STAR_TT_USERNAME    TeamTalk account username       (default: star)
   STAR_TT_PASSWORD    TeamTalk account password       (default: <placeholder>)
@@ -71,7 +71,7 @@ CONFIG = {
 # Optional local overrides (gitignored). This keeps your real account out of
 # version control entirely.
 try:
-    from . import config_local  # type: ignore
+    import config_local  # type: ignore
     if hasattr(config_local, "CONFIG"):
         CONFIG.update(config_local.CONFIG)
 except Exception:

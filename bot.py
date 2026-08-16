@@ -72,7 +72,7 @@ if not _has_upstream and os.path.isfile(os.path.join(_VENDOR_TT, "__init__.py"))
 import teamtalk
 from teamtalk.enums import UserStatusMode
 from teamtalk.implementation.TeamTalkPy import TeamTalk5 as sdk
-import star_tt_bot.star_client as _sc
+import star_client as _sc
 StarCoagulator = _sc.StarCoagulator
 
 log = logging.getLogger("star_tt_bot")

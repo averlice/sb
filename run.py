@@ -15,22 +15,20 @@ import sys
 import argparse
 import logging
 
-# ensure the project's `src/` layout is importable so the
-# `star_tt_bot` package resolves when run via `uv run python run.py`.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+# ensure the project directory (this file's folder) is importable so the
+# sibling modules resolve when run via `uv run python run.py`.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import star_tt_bot
-from star_tt_bot.bot import StarTeamTalkBot, build_bot_from_config
-from star_tt_bot import config  # noqa
+import bot
+
+from bot import StarTeamTalkBot, build_bot_from_config
+import config  # noqa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("star_tt_bot.runner")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# config.local.py lives alongside config.py inside the package so the
-# relative `from . import config_local` in config.py can find it.
-_PKG_DIR = os.path.join(_HERE, "src", "star_tt_bot")
-_LOCAL_CFG = os.path.join(_PKG_DIR, "config.local.py")
+_LOCAL_CFG = os.path.join(_HERE, "config.local.py")
 
 # Field order + prompts for the --set wizard. (key, label, secret?)
 _SET_FIELDS = [

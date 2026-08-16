@@ -16,19 +16,22 @@ It only responds to **private messages** sent directly to it (PM-only mode).
 
 ## Project layout
 
+Everything lives in **one folder** (the cloned repo). No nested `src/` maze:
+
 ```
-star_tt_bot/                      <- repo root
-├── run.py                        <- entry point (run this)
+star_tt_bot/                  <- the clone (your "1 thingy")
+├── run.py                    <- entry point (run this)
+├── bot.py                    <- the bot logic
+├── config.py                 <- defaults + env-var overrides
+├── star_client.py            <- STAR coagulator websocket client
+├── config.local.py.example   <- copy to config.local.py, fill in creds
+├── _tt_vendor/TeamTalkPy/    <- vendored SDK wrapper (offline)
 ├── pyproject.toml / uv.lock
 ├── README.md / LICENSE / .gitignore
-├── config.local.py.example       <- copy to src/star_tt_bot/config.local.py
-└── src/star_tt_bot/              <- the package
-    ├── __init__.py
-    ├── bot.py
-    ├── config.py
-    ├── star_client.py
-    └── _tt_vendor/TeamTalkPy/    <- vendored SDK wrapper (offline)
 ```
+
+After `uv sync` you may also have a gitignored `config.local.py` here (your
+real credentials — never committed).
 
 ## Setup
 
