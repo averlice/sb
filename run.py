@@ -15,19 +15,22 @@ import sys
 import argparse
 import logging
 
-# ensure the project directory (this file's folder) is importable so the
-# sibling modules resolve when run via `uv run python run.py`.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ensure the project's `src/` layout is importable so the
+# `star_tt_bot` package resolves when run via `uv run python run.py`.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
-import bot
-from bot import StarTeamTalkBot, build_bot_from_config
-import config  # noqa
+import star_tt_bot
+from star_tt_bot.bot import StarTeamTalkBot, build_bot_from_config
+from star_tt_bot import config  # noqa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("star_tt_bot.runner")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_LOCAL_CFG = os.path.join(_HERE, "config.local.py")
+# config.local.py lives alongside config.py inside the package so the
+# relative `from . import config_local` in config.py can find it.
+_PKG_DIR = os.path.join(_HERE, "src", "star_tt_bot")
+_LOCAL_CFG = os.path.join(_PKG_DIR, "config.local.py")
 
 # Field order + prompts for the --set wizard. (key, label, secret?)
 _SET_FIELDS = [
@@ -122,9 +125,15 @@ def main():
     ap.add_argument("--no-star", action="store_true", help="do not auto-connect to STAR")
     ap.add_argument("--star-uri", default=None, help="override STAR coagulator URI")
     ap.add_argument("--set", action="store_true", help="interactive setup -> config.local.py")
+    ap.add_argument("--force", action="store_true", help="with --set: overwrite existing config.local.py")
     args = ap.parse_args()
 
     if args.set:
+        if os.path.isfile(_LOCAL_CFG) and not args.force:
+            print(f"\nERROR: {_LOCAL_CFG} already exists.")
+            print("Delete it first (if you want to start over) or re-run with --force:")
+            print("  uv run python run.py --set --force")
+            return 1
         return run_setup()
 
     cfg = dict(config.CONFIG)

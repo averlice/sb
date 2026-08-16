@@ -14,13 +14,33 @@ It only responds to **private messages** sent directly to it (PM-only mode).
 - A running STAR coagulator (websocket) the bot can reach.
 - [uv](https://github.com/astral-sh/uv) for the Python environment.
 
-## Run (uv)
+## Project layout
+
+```
+star_tt_bot/                      <- repo root
+├── run.py                        <- entry point (run this)
+├── pyproject.toml / uv.lock
+├── README.md / LICENSE / .gitignore
+├── config.local.py.example       <- copy to src/star_tt_bot/config.local.py
+└── src/star_tt_bot/              <- the package
+    ├── __init__.py
+    ├── bot.py
+    ├── config.py
+    ├── star_client.py
+    └── _tt_vendor/TeamTalkPy/    <- vendored SDK wrapper (offline)
+```
+
+## Setup
 
 ```bat
 cd star_tt_bot
 uv sync
-uv run python run.py
+uv run python run.py --set        # interactive: enter your account details
+uv run python run.py              # run it
 ```
+
+`--set` writes a gitignored `src/star_tt_bot/config.local.py` so your
+credentials never leave your machine. Re-run with `--force` to overwrite.
 
 To run without auto-connecting to a STAR coagulator:
 
@@ -30,10 +50,11 @@ uv run python run.py --no-star
 
 ## Commands (send as a private message to the bot)
 
-- `/coag <ws://user:pass@host:port>` — connect to a STAR coagulator.
+- `/coag <ws://user:pass@host:port>` — connect to a STAR coagulator **for this
+  session only** (does not change your saved default).
 - `/coagulator <uri>` — alias of `/coag`.
 - `/coag stop` — disconnect from the coagulator.
-- `/voices` — list available voices.
+- `/voices` — list available voices, one per line.
 - `/voice <name>` — select the active voice (e.g. `/voice sam`).
 - `/rate <n>` — set speech rate (e.g. `/rate 200`). Injected into the spoken
   text as `[[rate n]]` (usually words/minute for most synths).
@@ -58,27 +79,28 @@ Switching voices resets rate/pitch to defaults (values are per-voice).
 ## Configuration
 
 **No secrets are stored in the repo.** Credentials come from environment
-variables or an optional, gitignored `config.local.py`. See `config.py` for the
-full list of `STAR_TT_*` / `STAR_COAG_*` environment variables.
+variables, a gitignored `config.local.py` (made via `--set`), or both. See
+`src/star_tt_bot/config.py` for the full list of `STAR_TT_*` / `STAR_COAG_*`
+environment variables.
 
-Defaults (overridable via env):
+Defaults (overridable via env or `config.local.py`):
 
 | Setting        | Default                       |
 |----------------|-------------------------------|
-| host           | `tt-server.com`               |
-| tcp/udp port   | `10443`                       |
+| host           | `tunmi13.com`                 |
+| tcp/udp port   | `9483`                        |
 | nickname       | `starbot`                     |
 | username       | `star`                        |
 | channel        | `/hangout area/`              |
 | STAR coag URI  | `wss://star.blindsoft.net`    |
 
-Set your real password with the `STAR_TT_PASSWORD` environment variable (or put
-`CONFIG = {...}` in a gitignored `config.local.py`).
+Set your real password with the `STAR_TT_PASSWORD` environment variable or via
+`uv run python run.py --set`.
 
 ## TeamTalk SDK note
 
 The Python `teamtalk` package normally tries to download a paywalled SDK from
 bearware.dk on first import. This repo vendors the wrapper we already use in
-`_tt_vendor/TeamTalkPy` so a fresh `uv sync` works offline. You still need the
-native **TeamTalk5.dll** installed on Windows (the bot points at
-`C:\Program Files\TeamTalk5` automatically).
+`src/star_tt_bot/_tt_vendor/TeamTalkPy` so a fresh `uv sync` works offline.
+You still need the native **TeamTalk5.dll** installed on Windows (the bot points
+at `C:\Program Files\TeamTalk5` automatically).

@@ -45,9 +45,9 @@ DEFAULT_STATUS = (
 
 CONFIG = {
     # TeamTalk server connection (non-secret)
-    "host": _env("STAR_TT_HOST", "tt-server.com"),
-    "tcp_port": int(_env("STAR_TT_TCP_PORT", "10443")),
-    "udp_port": int(_env("STAR_TT_UDP_PORT", "10443")),
+    "host": _env("STAR_TT_HOST", "tunmi13.com"),
+    "tcp_port": int(_env("STAR_TT_TCP_PORT", "9483")),
+    "udp_port": int(_env("STAR_TT_UDP_PORT", "9483")),
     "nickname": _env("STAR_TT_NICKNAME", "starbot"),
     "status": _env("STAR_TT_STATUS", DEFAULT_STATUS),
 

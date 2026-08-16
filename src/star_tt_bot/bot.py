@@ -72,7 +72,7 @@ if not _has_upstream and os.path.isfile(os.path.join(_VENDOR_TT, "__init__.py"))
 import teamtalk
 from teamtalk.enums import UserStatusMode
 from teamtalk.implementation.TeamTalkPy import TeamTalk5 as sdk
-import star_client as _sc
+import star_tt_bot.star_client as _sc
 StarCoagulator = _sc.StarCoagulator
 
 log = logging.getLogger("star_tt_bot")
@@ -146,19 +146,33 @@ class StarTeamTalkBot:
         at the first login event) or the channel tree is lost and
         getChannelIDFromPath() finds nothing.
 
-        If the account is already logged in elsewhere the server rejects the
-        login (doLogin returns False); we retry with backoff so the bot
-        self-heals once the other session logs out."""
+        If the account is already logged in elsewhere the server rejects with
+        CMDERR_ALREADY_LOGGEDIN (3001); we retry with backoff so the bot
+        self-heals once the other session logs out. Any OTHER login error
+        (bad account, not authorized, banned, etc.) is reported immediately
+        with the server's actual error code instead of a generic timeout.
+        """
         import time
         self._channel_tree = {}
         deadline = time.time() + timeout
         logged_in = False
         while time.time() < deadline:
             if not self.tt.doLogin(self.nickname, self.username, self.password, self.client_name):
-                # rejected (likely already logged in elsewhere); wait and retry
+                # doLogin returned False -> find out why from the server
+                err = self._wait_login_error(3)
+                if err is not None:
+                    code, msg = err
+                    if code == 3001:  # CMDERR_ALREADY_LOGGEDIN
+                        log.warning("Account already logged in elsewhere; retrying in 5s...")
+                        time.sleep(5)
+                        continue
+                    raise RuntimeError(
+                        f"Login rejected by server (code {code}: {msg}). "
+                        f"Check username/password and server account status.")
+                # no explicit error event; treat as transient and retry
                 time.sleep(3)
                 continue
-            # pump until login confirmed + channel tree received
+            # login command accepted; pump until confirmed + channel tree received
             end = time.time() + 12
             while time.time() < end:
                 m = self.tt.getMessage(200)
@@ -178,6 +192,10 @@ class StarTeamTalkBot:
                     self._channel_tree[ch.nChannelID] = (sdk.ttstr(ch.szName), ch.nParentID)
                 elif ev == CLIENTEVENT_CON_LOST:
                     raise RuntimeError("Connection lost during login")
+                elif ev == int(sdk.ClientEvent.CLIENTEVENT_CMD_ERROR):
+                    code = getattr(m, "nError", 0)
+                    msg = sdk.getErrorMessage(code) if hasattr(sdk, "getErrorMessage") else ""
+                    log.error("Server error during login: code %s %s", code, msg)
                 if logged_in and (self.tt.getRootChannelID() > 0 or len(self._channel_tree) >= 1):
                     grace_end = time.time() + 1.5
                     while time.time() < grace_end:
@@ -191,6 +209,26 @@ class StarTeamTalkBot:
             # login command accepted but no confirmation; loop will retry
         raise RuntimeError("Never received login confirmation from server "
                           "(account may already be logged in elsewhere)")
+
+    def _wait_login_error(self, wait_s):
+        """Pump briefly for a CLIENTEVENT_CMD_ERROR and return (code, msg) or None."""
+        import time
+        end = time.time() + wait_s
+        while time.time() < end:
+            m = self.tt.getMessage(200)
+            if not m:
+                continue
+            if m.nClientEvent == int(sdk.ClientEvent.CLIENTEVENT_CMD_ERROR):
+                code = getattr(m, "nError", 0)
+                msg = ""
+                try:
+                    msg = sdk.getErrorMessage(code)
+                except Exception:
+                    pass
+                return (code, msg)
+            if m.nClientEvent == CLIENTEVENT_CON_LOST:
+                raise RuntimeError("Connection lost during login")
+        return None
 
     def _join_channel(self):
         chan_id = self.tt.getChannelIDFromPath(self.channel_path)
