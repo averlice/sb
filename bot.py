@@ -282,9 +282,10 @@ class StarTeamTalkBot:
 
     def cmd_help(self, arg, tm):
         self.send_pm(tm.nFromUserID,
-            "Commands: /coag <ws uri>, /coagulator <uri>, /coag stop, /voices, "
-            "/voice <name>, /rate <n>, /pitch <n>, /stop, /help. "
-            "Any PM without a leading slash is spoken aloud (e.g. just type 'hello').")
+            "Commands: /coag <ws uri> (session-only), /coagulator <uri>, /coag stop, "
+            "/voices (lists one per line), /voice <name>, /rate <n>, /pitch <n>, "
+            "/stop, /help. Any PM without a leading slash is spoken aloud "
+            "(e.g. just type 'hello').")
 
     def cmd_coag(self, arg, tm):
         if arg.lower() == "stop":
@@ -310,9 +311,10 @@ class StarTeamTalkBot:
             self.send_pm(tm.nFromUserID, "No voices listed yet (server may still be syncing). Try again in a moment.")
             return
         names = [v["name"] if isinstance(v, dict) else str(v) for v in voices]
+        # One voice per line so screen readers / chat clients list them cleanly.
         self.send_pm(tm.nFromUserID, f"{len(names)} voices:")
-        for i in range(0, len(names), 20):
-            self.send_pm(tm.nFromUserID, ", ".join(names[i:i + 20]))
+        listing = "\n".join(names)
+        self.send_pm(tm.nFromUserID, listing)
 
     # ---- voice capability / tag injection -------------------------------
     # Per Sam Tupy (STAR author): rate/pitch are inserted as literal tags
