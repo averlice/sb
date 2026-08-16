@@ -122,12 +122,16 @@ class StarTeamTalkBot:
 
     # ---- lifecycle -------------------------------------------------------
     def connect(self):
-        log.info("Connecting to TeamTalk server %s:%d", self.host, self.tcp_port)
+        log.info("Connecting to TeamTalk server %s:%d (udp %d, encrypted=%s)",
+                 self.host, self.tcp_port, self.udp_port, self.encrypted)
         ok = self.tt.connect(self.host, self.tcp_port, self.udp_port,
                              nLocalTcpPort=0, nLocalUdpPort=0, bEncrypted=self.encrypted)
         if not ok:
-            raise RuntimeError("TeamTalk connect failed")
-        log.info("Connected. Logging in as %s", self.nickname)
+            err = self._safe_last_error()
+            raise RuntimeError(f"TeamTalk connect() failed for {self.host}:{self.tcp_port}"
+                               + (f" (server error {err})" if err else ""))
+        log.info("TCP/UDP connection established. Logging in as nickname=%r username=%r",
+                 self.nickname, self.username)
         self._login_and_sync()
         log.info("Logged in (%d channels visible). Joining '%s'",
                  len(self._channel_tree), self.channel_path)
@@ -138,6 +142,16 @@ class StarTeamTalkBot:
         else:
             log.warning("Could not join '%s'; staying unjoined. Commands still work via PM.",
                         self.channel_path)
+
+    def _safe_last_error(self):
+        """Best-effort fetch of the SDK's last error string, for diagnostics."""
+        try:
+            code = self.tt.getLastError()
+            if code:
+                return f"{code}: {getattr(self.tt, 'getErrorMessage', lambda c: '') (code)}"
+        except Exception:
+            pass
+        return ""
 
     def _login_and_sync(self, timeout=20):
         """Log in and pump events until we are logged in AND have the channel
@@ -156,22 +170,44 @@ class StarTeamTalkBot:
         self._channel_tree = {}
         deadline = time.time() + timeout
         logged_in = False
+        do_login_calls = 0
+        do_login_rejected = 0
+        last_error = None          # most recent non-zero CMD_ERROR (code, msg)
+        seen_events = []           # diagnostic trail of event codes
+        con_lost = False
+
+        def _note(ev, extra=""):
+            seen_events.append((ev, extra))
+            if len(seen_events) > 40:
+                seen_events.pop(0)
+
         while time.time() < deadline:
+            do_login_calls += 1
             if not self.tt.doLogin(self.nickname, self.username, self.password, self.client_name):
+                do_login_rejected += 1
+                log.warning("doLogin() returned False (attempt %d)", do_login_calls)
                 # doLogin returned False -> find out why from the server
                 err = self._wait_login_error(3)
                 if err is not None:
                     code, msg = err
+                    last_error = (code, msg)
                     if code == 3001:  # CMDERR_ALREADY_LOGGEDIN
-                        log.warning("Account already logged in elsewhere; retrying in 5s...")
+                        log.warning("Account already logged in elsewhere (code 3001); retrying in 5s...")
+                        _note(3001, msg)
                         time.sleep(5)
                         continue
+                    log.error("Login REJECTED by server: code %s (%s). Check username/password/account.",
+                              code, msg)
                     raise RuntimeError(
                         f"Login rejected by server (code {code}: {msg}). "
                         f"Check username/password and server account status.")
                 # no explicit error event; treat as transient and retry
+                _note(-1, "doLogin False, no error event")
+                log.warning("doLogin False but no server error event within 3s; retrying...")
                 time.sleep(3)
                 continue
+            log.info("doLogin() accepted (attempt %d); pumping for confirmation...", do_login_calls)
+            _note(0, "doLogin accepted")
             # login command accepted; pump until confirmed + channel tree received
             end = time.time() + 12
             while time.time() < end:
@@ -181,6 +217,8 @@ class StarTeamTalkBot:
                 ev = m.nClientEvent
                 if ev == CLIENTEVENT_CMD_MYSELF_LOGGEDIN:
                     logged_in = True
+                    _note(ev, "MYSELF_LOGGEDIN")
+                    log.info("Received MYSELF_LOGGEDIN event.")
                     if self.status:
                         try:
                             self.tt.doChangeStatus(UserStatusMode.ONLINE, self.status)
@@ -190,7 +228,10 @@ class StarTeamTalkBot:
                 elif ev == int(sdk.ClientEvent.CLIENTEVENT_CMD_CHANNEL_NEW) and m.channel:
                     ch = m.channel
                     self._channel_tree[ch.nChannelID] = (sdk.ttstr(ch.szName), ch.nParentID)
+                    _note(ev, sdk.ttstr(ch.szName))
                 elif ev == CLIENTEVENT_CON_LOST:
+                    con_lost = True
+                    _note(ev, "CON_LOST")
                     raise RuntimeError("Connection lost during login")
                 elif ev == int(sdk.ClientEvent.CLIENTEVENT_CMD_ERROR):
                     code = getattr(m, "nError", 0)
@@ -199,8 +240,11 @@ class StarTeamTalkBot:
                     # login; only non-zero codes are real failures.
                     if code != 0:
                         msg = sdk.getErrorMessage(code) if hasattr(sdk, "getErrorMessage") else ""
-                        log.error("Server error during login: code %s %s", code, msg)
+                        last_error = (code, msg)
+                        _note(ev, f"code {code}: {msg}")
+                        log.error("Server error during login: code %s (%s)", code, msg)
                     else:
+                        _note(ev, "code 0 (success ACK)")
                         log.debug("Server login ACK (code 0 = success).")
                 if logged_in and (self.tt.getRootChannelID() > 0 or len(self._channel_tree) >= 1):
                     grace_end = time.time() + 1.5
@@ -212,9 +256,37 @@ class StarTeamTalkBot:
                     return
             if logged_in:
                 return
+            _note(-2, "doLogin accepted but no confirmation in 12s")
             # login command accepted but no confirmation; loop will retry
-        raise RuntimeError("Never received login confirmation from server "
-                          "(account may already be logged in elsewhere)")
+        # ---- timeout: emit a full diagnostic so the failure is never silent ----
+        diag = (
+            f"LOGIN TIMEOUT after {timeout}s. Summary:\n"
+            f"  doLogin calls: {do_login_calls}, rejected: {do_login_rejected}\n"
+            f"  ever logged in: {logged_in}\n"
+            f"  connection lost: {con_lost}\n"
+            f"  last server error: {last_error}\n"
+            f"  connection state (getMyUserID): {self._safe_get_my_userid()}\n"
+            f"  root channel id: {self._safe_root_channel()}\n"
+            f"  last {len(seen_events)} events seen: "
+            + ", ".join(f"{e[0]}({e[1]})" for e in seen_events)
+        )
+        log.error(diag)
+        raise RuntimeError(
+            "Never received login confirmation from server. "
+            + (f"Last server error code {last_error[0]}: {last_error[1]}. " if last_error else "")
+            + "See log above for the full event trail.")
+
+    def _safe_get_my_userid(self):
+        try:
+            return self.tt.getMyUserID()
+        except Exception as e:
+            return f"<error: {e}>"
+
+    def _safe_root_channel(self):
+        try:
+            return self.tt.getRootChannelID()
+        except Exception as e:
+            return f"<error: {e}>"
 
     def _wait_login_error(self, wait_s):
         """Pump briefly for a real login failure (CLIENTEVENT_CMD_ERROR with a
