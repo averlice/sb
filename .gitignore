@@ -1,0 +1,20 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg-info/
+star_tt_bot.egg-info/
+
+# Local secrets -- NEVER commit your real credentials
+config.local.py
+
+# Logs / temp
+*.log
+live_run.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
