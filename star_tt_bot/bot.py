@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import sys
 import threading
+import queue
 
 # --- Make the locally installed TeamTalk5.dll loadable on Windows ---
 _TT_DLL_DIR = r"C:\Program Files\TeamTalk5"
@@ -115,15 +116,20 @@ class StarTeamTalkBot:
         self.tt = sdk.TeamTalk()
         self.coag = StarCoagulator()
 
-        self.active_voice = None
-        self.rate = 0.0    # 0 = unset; when set, injected as [[rate N]]
-        self.pitch = 0.0   # 0 = unset; when set, injected as [[pbas N]]
+        # Per-user settings: {user_id: {"voice": str, "rate": float, "pitch": float}}
+        self._user_settings: dict[int, dict] = {}
+        self._settings_lock = threading.Lock()
 
         self._stream_lock = threading.Lock()
         self._streaming = False
         self._temp_files = []
         self._last_from = 0
         self.running = True
+
+        # Synthesis queue
+        self._synth_queue: queue.Queue = queue.Queue()
+        self._synth_worker_thread: threading.Thread | None = None
+        self._synth_stop = threading.Event()
 
     # ---- lifecycle -------------------------------------------------------
     def connect(self):
@@ -445,6 +451,11 @@ class StarTeamTalkBot:
             self.tt.closeTeamTalk()
         except Exception:
             pass
+        # Stop synthesis worker
+        self._synth_stop.set()
+        self._synth_queue.put(None)  # unblock worker
+        if self._synth_worker_thread and self._synth_worker_thread.is_alive():
+            self._synth_worker_thread.join(timeout=2.0)
 
     # ---- command handling -----------------------------------------------
     def _sender_label(self, tm):
@@ -460,6 +471,101 @@ class StarTeamTalkBot:
         if nickname and nickname != username:
             return f"{nickname} ({username})"
         return username or nickname or "unknown"
+
+    # ---- per-user settings --------------------------------------------------
+    def _get_user_settings(self, user_id: int) -> dict:
+        with self._settings_lock:
+            if user_id not in self._user_settings:
+                self._user_settings[user_id] = {"voice": None, "rate": 0.0, "pitch": 0.0}
+            return self._user_settings[user_id]
+
+    def _get_user_voice(self, user_id: int) -> str | None:
+        return self._get_user_settings(user_id).get("voice")
+
+    def _set_user_voice(self, user_id: int, voice: str):
+        with self._settings_lock:
+            if user_id not in self._user_settings:
+                self._user_settings[user_id] = {"voice": None, "rate": 0.0, "pitch": 0.0}
+            self._user_settings[user_id]["voice"] = voice
+            self._user_settings[user_id]["rate"] = 0.0
+            self._user_settings[user_id]["pitch"] = 0.0
+
+    def _get_user_rate(self, user_id: int) -> float:
+        return self._get_user_settings(user_id).get("rate", 0.0)
+
+    def _set_user_rate(self, user_id: int, rate: float):
+        with self._settings_lock:
+            if user_id not in self._user_settings:
+                self._user_settings[user_id] = {"voice": None, "rate": 0.0, "pitch": 0.0}
+            self._user_settings[user_id]["rate"] = rate
+
+    def _get_user_pitch(self, user_id: int) -> float:
+        return self._get_user_settings(user_id).get("pitch", 0.0)
+
+    def _set_user_pitch(self, user_id: int, pitch: float):
+        with self._settings_lock:
+            if user_id not in self._user_settings:
+                self._user_settings[user_id] = {"voice": None, "rate": 0.0, "pitch": 0.0}
+            self._user_settings[user_id]["pitch"] = pitch
+
+    # ---- synthesis queue worker --------------------------------------------
+    def _start_synth_worker(self):
+        if self._synth_worker_thread is None or not self._synth_worker_thread.is_alive():
+            self._synth_stop.clear()
+            self._synth_worker_thread = threading.Thread(target=self._synth_worker, daemon=True)
+            self._synth_worker_thread.start()
+
+    def _synth_worker(self):
+        """Background worker that processes synthesis requests sequentially."""
+        while not self._synth_stop.is_set():
+            try:
+                item = self._synth_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if item is None:  # shutdown signal
+                break
+            user_id, text, announce_from = item
+            try:
+                self._process_synthesis(user_id, text, announce_from)
+            except Exception as e:
+                log.exception("Synthesis failed for user %d", user_id)
+                self.send_pm(user_id, f"Synthesis failed: {e}")
+            finally:
+                self._synth_queue.task_done()
+
+    def _process_synthesis(self, user_id: int, text: str, announce_from):
+        """Actually synthesize and stream audio for a user."""
+        settings = self._get_user_settings(user_id)
+        voice = settings.get("voice")
+        if not voice:
+            self.send_pm(user_id, "No voice selected. Use /voice <name> first (see /voices).")
+            return
+        if not self.coag.connected:
+            self.send_pm(user_id, "Not connected to a coagulator. Use /coag <uri> first.")
+            return
+
+        textline = self._build_speech_line(text, voice, settings.get("rate", 0.0), settings.get("pitch", 0.0))
+        self.send_pm(user_id, f"Synthesizing with {voice}...")
+        try:
+            audio = self.coag.synthesize(textline, timeout=30)
+        except Exception as e:
+            self.send_pm(user_id, f"Synthesis failed: {e}")
+            return
+        self._stream_audio(audio)
+
+    def _build_speech_line(self, text: str, voice: str, rate: float, pitch: float) -> str:
+        """Build the STAR speech line: 'Voice: [[rate X]] [[pbas Y]] <text>'."""
+        parts = []
+        if rate:
+            parts.append(f"[[rate {rate}]]")
+        if pitch:
+            parts.append(f"[[pbas {pitch}]]")
+        tagged = " ".join(parts)
+        if tagged:
+            spoken = f"{tagged} {text}"
+        else:
+            spoken = text
+        return f"{voice}: {spoken}"
 
     def _on_text_message(self, tm):
         msg_type = int(tm.nMsgType)
@@ -568,80 +674,68 @@ class StarTeamTalkBot:
         return "Rate/pitch: numbers vary by voice -- try and listen."
 
     def cmd_voice(self, arg, tm):
+        user_id = tm.nFromUserID
         if not arg:
-            self.send_pm(tm.nFromUserID, f"Current voice: {self.active_voice or '(none)'}.")
+            voice = self._get_user_voice(user_id)
+            self.send_pm(user_id, f"Current voice: {voice or '(none)'}.")
             return
-        if self.active_voice and self.active_voice.lower() == arg.lower():
-            self.send_pm(tm.nFromUserID,
+        if self._get_user_voice(user_id) and self._get_user_voice(user_id).lower() == arg.lower():
+            self.send_pm(user_id,
                 f"Voice already: {arg}. {self._voice_hint(arg)}")
             return
         # Switching voices: reset rate/pitch to defaults. Rate/pitch values are
         # tuned per-voice (e.g. Mac words/minute vs other engines' scales), so
         # carrying an old voice's numbers into a new voice produces wrong speech.
-        self.active_voice = arg
-        self.rate = 0.0
-        self.pitch = 0.0
-        self.send_pm(tm.nFromUserID,
+        self._set_user_voice(user_id, arg)
+        self.send_pm(user_id,
             f"Voice set to: {arg}. Rate/pitch reset to defaults — set them again "
             f"for this voice. {self._voice_hint(arg)}")
 
     def cmd_rate(self, arg, tm):
+        user_id = tm.nFromUserID
         try:
-            self.rate = float(arg)
+            rate = float(arg)
         except ValueError:
-            self.send_pm(tm.nFromUserID,
+            self.send_pm(user_id,
                 "Rate must be a number, e.g. /rate 200 (words/minute for most synths).")
             return
-        self.send_pm(tm.nFromUserID,
-            f"Rate set to {self.rate} (injected as [[rate {self.rate}]]).")
+        self._set_user_rate(user_id, rate)
+        self.send_pm(user_id,
+            f"Rate set to {rate} (injected as [[rate {rate}]]).")
 
     def cmd_pitch(self, arg, tm):
+        user_id = tm.nFromUserID
         try:
-            self.pitch = float(arg)
+            pitch = float(arg)
         except ValueError:
-            self.send_pm(tm.nFromUserID,
+            self.send_pm(user_id,
                 "Pitch must be a number, e.g. /pitch 80 (voice-dependent).")
             return
-        self.send_pm(tm.nFromUserID,
-            f"Pitch set to {self.pitch} (injected as [[pbas {self.pitch}]]).")
-
-    def _build_speech_line(self, text):
-        """Build the STAR speech line: 'Voice: [[rate X]] [[pbas Y]] <text>'.
-        Tags are only injected when the user changed them from the default
-        (rate 0 / pitch 0 = unset)."""
-        parts = []
-        if self.rate:
-            parts.append(f"[[rate {self.rate}]]")
-        if self.pitch:
-            parts.append(f"[[pbas {self.pitch}]]")
-        tagged = " ".join(parts)
-        if tagged:
-            spoken = f"{tagged} {text}"
-        else:
-            spoken = text
-        return f"{self.active_voice}: {spoken}"
+        self._set_user_pitch(user_id, pitch)
+        self.send_pm(user_id,
+            f"Pitch set to {pitch} (injected as [[pbas {pitch}]]).")
 
     def cmd_speak(self, arg, tm, announce_from=None):
+        user_id = tm.nFromUserID
         if not arg:
-            self.send_pm(tm.nFromUserID, "Usage: /speak <text>")
+            self.send_pm(user_id, "Usage: /speak <text>")
             return
         if not self.coag.connected:
-            self.send_pm(tm.nFromUserID, "Not connected to a coagulator. Use /coag <uri> first.")
+            self.send_pm(user_id, "Not connected to a coagulator. Use /coag <uri> first.")
             return
-        if not self.active_voice:
-            self.send_pm(tm.nFromUserID, "No voice selected. Use /voice <name> first (see /voices).")
+        if not self._get_user_voice(user_id):
+            self.send_pm(user_id, "No voice selected. Use /voice <name> first (see /voices).")
             return
         # When triggered by a plain (non-slash) PM, announce who said it.
         if announce_from is not None:
             arg = f"{self._sender_label(announce_from)} said: {arg}"
-        textline = self._build_speech_line(arg)
-        self.send_pm(tm.nFromUserID, f"Synthesizing with {self.active_voice}...")
-        try:
-            audio = self.coag.synthesize(textline, timeout=30)
-        except Exception as e:
-            self.send_pm(tm.nFromUserID, f"Synthesis failed: {e}")
-            return
-        self._stream_audio(audio)
+        # Queue synthesis request
+        self._start_synth_worker()
+        self._synth_queue.put((user_id, arg, announce_from))
+        self.send_pm(user_id, "Queued for synthesis...")
+
+    # Remove old _build_speech_line (instance method using self.active_voice)
+    # The new one is _build_speech_line(text, voice, rate, pitch) above
 
     def cmd_stop(self, arg, tm):
         with self._stream_lock:
