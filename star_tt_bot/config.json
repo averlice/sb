@@ -1,0 +1,14 @@
+{
+  "host": "tunmi13.com",
+  "tcp_port": 9483,
+  "udp_port": 9483,
+  "nickname": "starbot",
+  "username": "star",
+  "password": "starbot",
+  "channel_path": "/hangout area/",
+  "channel_password": "",
+  "encrypted": false,
+  "star_uri": "wss://star.blindsoft.net",
+  "pm_only": true,
+  "status": "This bot allows you to use STAR (Speech To Audio Relay) made by Sam Tupy. To see the Star Bot project, go to: https://github.com/averlice/sb"
+}

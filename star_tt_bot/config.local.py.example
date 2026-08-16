@@ -1,0 +1,27 @@
+# Copy this file to `config.local.py` (same folder) and fill in your real
+# account details. `config.local.py` is gitignored, so it will NEVER be
+# committed or pushed to GitHub.
+#
+# Only set the keys you want to override. Anything you omit falls back to the
+# defaults in config.py (and to STAR_TT_* environment variables).
+
+CONFIG = {
+    # TeamTalk server
+    "host": "tunmi13.com",
+    "tcp_port": 9483,
+    "udp_port": 9483,
+    "nickname": "starbot",
+    "status": "",  # optional bot status message
+
+    # Credentials (REQUIRED -- do not leave the placeholder)
+    "username": "star",
+    "password": "REPLACE_WITH_YOUR_REAL_PASSWORD",
+
+    # Channel to join
+    "channel_path": "/hangout area/",
+    "channel_password": "",
+    "encrypted": False,
+
+    # STAR coagulator websocket URI
+    "star_uri": "wss://star.blindsoft.net",
+}

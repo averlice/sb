@@ -1,0 +1,25 @@
+[project]
+name = "sb"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "accessible-output2>=0.17",
+    "argparse>=1.4.0",
+    "audioop-lts>=0.2.2 ; python_full_version >= '3.13'",
+    "configobj>=5.0.9",
+    "mistune>=3.3.4",
+    "platform-utils",
+    "pydub>=0.25.1",
+    "pyinstaller>=6.22.1",
+    "resource-finder",
+    "smart-list",
+    "sound-lib",
+    "websockets>=17.0.1",
+    "wxpython>=4.3.1",
+]
+
+[tool.uv.sources]
+platform-utils = { git = "https://github.com/accessibleapps/platform_utils" }
+resource-finder = { git = "https://github.com/accessibleapps/resource_finder" }
+smart-list = { git = "https://github.com/samtupy/smart_list_macos_fixes" }
+sound-lib = { git = "https://github.com/samtupy/sound_lib_macos_fixes" }

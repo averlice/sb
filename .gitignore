@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ttbot-venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local config with secrets
+star_tt_bot/config.local.py
+
+# Logs
+*.log
+probe.log
+live_run.log
+
+# Debug/probe scripts
+probe_*.py
+run_probe.py
+test_*.py
+
+# Temp files
+*.tmp
+*.temp
+tree.json
+
+# Research/experiments
+star_research/
+scratch/
+
+# HTML debug output
+*.html
+mfp.html
+
+# JSON dumps
+lib.json
+ttp.json
+ttdll.json
+
+# Lock files (optional - some commit uv.lock)
+# uv.lock
