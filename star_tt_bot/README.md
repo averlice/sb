@@ -22,34 +22,63 @@ Everything lives in **one folder** (the cloned repo). No nested `src/` maze:
 star_tt_bot/                  <- the clone (your "1 thingy")
 ├── run.py                    <- entry point (run this)
 ├── bot.py                    <- the bot logic
-├── config.py                 <- defaults + env-var overrides
+├── config.py                 <- loads config.json (no more env-var maze)
 ├── star_client.py            <- STAR coagulator websocket client
-├── config.local.py.example   <- copy to config.local.py, fill in creds
+├── config.json               <- your settings (edit this directly)
+├── config.local.py.example   <- optional local override (gitignored)
 ├── _tt_vendor/TeamTalkPy/    <- vendored SDK wrapper (offline)
 ├── pyproject.toml / uv.lock
 ├── README.md / LICENSE / .gitignore
 ```
-
-After `uv sync` you may also have a gitignored `config.local.py` here (your
-real credentials — never committed).
 
 ## Setup
 
 ```bat
 cd star_tt_bot
 uv sync
-uv run python run.py --set        # interactive: enter your account details
-uv run python run.py              # run it
+# Edit config.json with your TeamTalk credentials and channel
+uv run python run.py          # run it
 ```
-
-`--set` writes a gitignored `src/star_tt_bot/config.local.py` so your
-credentials never leave your machine. Re-run with `--force` to overwrite.
 
 To run without auto-connecting to a STAR coagulator:
 
 ```bat
 uv run python run.py --no-star
 ```
+
+## Configuration
+
+Edit `star_tt_bot/config.json` directly — **single file, no secrets in repo**:
+
+```json
+{
+  "host": "your-server.com",
+  "tcp_port": 9483,
+  "udp_port": 9483,
+  "nickname": "your-bot-name",
+  "username": "your-account",
+  "password": "your-password",
+  "channel_path": "/your/channel/path/",
+  "channel_password": "",
+  "encrypted": false,
+  "star_uri": "wss://star.blindsoft.net",
+  "pm_only": true,
+  "status": "Bot status message"
+}
+```
+
+Optional: create `config.local.py` (gitignored) to override specific keys — never committed.
+
+| Setting        | Description                    |
+|----------------|--------------------------------|
+| host           | TeamTalk server hostname       |
+| tcp/udp port   | TeamTalk ports (usually 9483)  |
+| nickname       | Bot display nickname           |
+| username       | TeamTalk account username      |
+| password       | TeamTalk account password      |
+| channel_path   | Channel to join (e.g. `/hangout area/`) |
+| encrypted      | Use TLS (`true`/`false`)       |
+| star_uri       | STAR coagulator websocket URI  |
 
 ## Commands (send as a private message to the bot)
 
@@ -79,31 +108,21 @@ Switching voices resets rate/pitch to defaults (values are per-voice).
 > them. Some novelty voices speak the brackets literally — that's a voice
 > quirk, not a bot bug. Experiment per voice to find good values.
 
-## Configuration
-
-**No secrets are stored in the repo.** Credentials come from environment
-variables, a gitignored `config.local.py` (made via `--set`), or both. See
-`src/star_tt_bot/config.py` for the full list of `STAR_TT_*` / `STAR_COAG_*`
-environment variables.
-
-Defaults (overridable via env or `config.local.py`):
-
-| Setting        | Default                       |
-|----------------|-------------------------------|
-| host           | `tunmi13.com`                 |
-| tcp/udp port   | `9483`                        |
-| nickname       | `starbot`                     |
-| username       | `star`                        |
-| channel        | `/hangout area/`              |
-| STAR coag URI  | `wss://star.blindsoft.net`    |
-
-Set your real password with the `STAR_TT_PASSWORD` environment variable or via
-`uv run python run.py --set`.
-
 ## TeamTalk SDK note
 
 The Python `teamtalk` package normally tries to download a paywalled SDK from
 bearware.dk on first import. This repo vendors the wrapper we already use in
-`src/star_tt_bot/_tt_vendor/TeamTalkPy` so a fresh `uv sync` works offline.
+`star_tt_bot/_tt_vendor/TeamTalkPy` so a fresh `uv sync` works offline.
 You still need the native **TeamTalk5.dll** installed on Windows (the bot points
 at `C:\Program Files\TeamTalk5` automatically).
+
+## Known quirks / troubleshooting
+
+- **Channel not found**: The bot logs all discovered channels on startup.
+  Match the `channel_path` exactly (case-sensitive, leading slash).
+- **Login succeeds but no channels**: The server sends the channel tree *after*
+  login. The bot now waits 3s for `CLIENTEVENT_CMD_CHANNEL_NEW` events.
+- **Synthesis timeout**: If a voice requires extra params, the server returns
+  a JSON error (e.g. "400 this voice requires a model name"). Try a different voice.
+- **No audio heard**: Ensure you have `USERRIGHT_TRANSMIT_MEDIAFILE_AUDIO` on
+  the server, and `ffmpeg` is on PATH.
