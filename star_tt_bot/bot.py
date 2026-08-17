@@ -28,6 +28,8 @@ import tempfile
 import sys
 import threading
 import queue
+import difflib
+import time
 
 # --- Make the locally installed TeamTalk5.dll loadable on Windows ---
 _TT_DLL_DIR = r"C:\Program Files\TeamTalk5"
@@ -94,6 +96,8 @@ NOVIDEOFORMAT = 0
 CLIENTEVENT_CMD_MYSELF_LOGGEDIN = int(sdk.ClientEvent.CLIENTEVENT_CMD_MYSELF_LOGGEDIN)
 CLIENTEVENT_CMD_USER_TEXTMSG = int(sdk.ClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG)
 CLIENTEVENT_CON_LOST = int(sdk.ClientEvent.CLIENTEVENT_CON_LOST)
+CLIENTEVENT_STREAM_MEDIAFILE = int(sdk.ClientEvent.CLIENTEVENT_STREAM_MEDIAFILE)
+CLIENTEVENT_LOCAL_MEDIAFILE = int(sdk.ClientEvent.CLIENTEVENT_LOCAL_MEDIAFILE)
 
 
 class StarTeamTalkBot:
@@ -130,6 +134,13 @@ class StarTeamTalkBot:
         self._synth_queue: queue.Queue = queue.Queue()
         self._synth_worker_thread: threading.Thread | None = None
         self._synth_stop = threading.Event()
+
+        # Playback queue (audio files ready to stream)
+        self._playback_queue: queue.Queue = queue.Queue()
+        self._playback_worker_thread: threading.Thread | None = None
+        self._playback_stop = threading.Event()
+        self._playback_lock = threading.Lock()
+        self._current_playback_path = None
 
     # ---- lifecycle -------------------------------------------------------
     def connect(self):
@@ -432,6 +443,8 @@ class StarTeamTalkBot:
             elif ev == CLIENTEVENT_CON_LOST:
                 log.warning("Connection to server lost.")
                 self.running = False
+            elif ev in (CLIENTEVENT_STREAM_MEDIAFILE, CLIENTEVENT_LOCAL_MEDIAFILE):
+                self._on_media_file_event(msg)
 
     def disconnect(self):
         self.running = False
@@ -453,9 +466,26 @@ class StarTeamTalkBot:
             pass
         # Stop synthesis worker
         self._synth_stop.set()
-        self._synth_queue.put(None)  # unblock worker
+        self._synth_queue.put(None)
         if self._synth_worker_thread and self._synth_worker_thread.is_alive():
             self._synth_worker_thread.join(timeout=2.0)
+        # Stop playback worker
+        self._playback_stop.set()
+        self._playback_queue.put(None)
+        if self._playback_worker_thread and self._playback_worker_thread.is_alive():
+            self._playback_worker_thread.join(timeout=2.0)
+        # Clean up any remaining temp files in playback queue
+        while not self._playback_queue.empty():
+            try:
+                wav_path, out_path = self._playback_queue.get_nowait()
+                try:
+                    os.remove(wav_path)
+                    os.remove(out_path)
+                except OSError:
+                    pass
+            except queue.Empty:
+                break
+        self._cleanup_temp()
 
     # ---- command handling -----------------------------------------------
     def _sender_label(self, tm):
@@ -534,7 +564,7 @@ class StarTeamTalkBot:
                 self._synth_queue.task_done()
 
     def _process_synthesis(self, user_id: int, text: str, announce_from):
-        """Actually synthesize and stream audio for a user."""
+        """Synthesize audio and queue it for playback."""
         settings = self._get_user_settings(user_id)
         voice = settings.get("voice")
         if not voice:
@@ -551,7 +581,99 @@ class StarTeamTalkBot:
         except Exception as e:
             self.send_pm(user_id, f"Synthesis failed: {e}")
             return
-        self._stream_audio(audio)
+        self._queue_audio_for_playback(audio)
+
+    def _queue_audio_for_playback(self, audio_bytes):
+        """Save audio to temp file and add to playback queue."""
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=tempfile.gettempdir())
+        tmp.write(audio_bytes)
+        tmp.close()
+        wav_path = tmp.name
+        out_path = wav_path + ".stream.wav"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", wav_path, "-ac", "1", "-ar", "44100", out_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("ffmpeg transcode timed out; using original")
+            out_path = wav_path
+        except Exception as e:
+            log.warning("ffmpeg transcode failed (%s); using original", e)
+            out_path = wav_path
+        self._playback_queue.put((wav_path, out_path))
+        self._start_playback_worker()
+        log.info("Queued %d-byte audio for playback (queue size: %d)", len(audio_bytes), self._playback_queue.qsize())
+
+    # ---- playback queue worker --------------------------------------------
+    def _start_playback_worker(self):
+        if self._playback_worker_thread is None or not self._playback_worker_thread.is_alive():
+            self._playback_stop.clear()
+            self._playback_worker_thread = threading.Thread(target=self._playback_worker, daemon=True)
+            self._playback_worker_thread.start()
+
+    def _playback_worker(self):
+        """Background worker that streams audio files sequentially from the queue."""
+        while not self._playback_stop.is_set():
+            try:
+                item = self._playback_queue.get(timeout=1.0)
+            except queue.Empty:
+                with self._playback_lock:
+                    if self._current_playback_path is None:
+                        continue
+                # Still playing current file, wait a bit
+                time.sleep(0.5)
+                continue
+            if item is None:  # shutdown signal
+                break
+            wav_path, out_path = item
+            self._stream_audio_file(wav_path, out_path)
+            # Wait for playback to finish (signaled by media file event)
+            while True:
+                time.sleep(0.5)
+                with self._playback_lock:
+                    if self._current_playback_path is None:
+                        break
+            self._playback_queue.task_done()
+
+    def _on_media_file_event(self, msg):
+        """Handle media file streaming events - detect when playback finishes."""
+        # Check media file info status
+        if hasattr(msg, 'mediafileinfo') and msg.mediafileinfo:
+            mfi = msg.mediafileinfo
+            status = getattr(mfi, 'nStatus', 0)
+            # MediaFileStatus: CLOSED=0, ERROR=1, STARTED=2, FINISHED=3, ABORTED=4, PAUSED=5, PLAYING=6
+            if status in (3, 4, 1):  # FINISHED, ABORTED, ERROR
+                with self._playback_lock:
+                    self._current_playback_path = None
+                log.debug("Media file playback finished (status=%d)", status)
+            elif status in (2, 6):  # STARTED, PLAYING
+                log.debug("Media file playback started/playing (status=%d)", status)
+        else:
+            # Fallback: assume event means finished
+            with self._playback_lock:
+                self._current_playback_path = None
+            log.debug("Media file event received (no info), playback marked as finished")
+
+    def _stream_audio_file(self, wav_path, out_path):
+        """Stream a single audio file to the channel."""
+        with self._stream_lock:
+            self._cleanup_temp()
+            self._temp_files = [wav_path, out_path]
+            self._current_playback_path = out_path
+            vc = sdk.VideoCodec()
+            vc.nCodec = NOVIDEOFORMAT
+            ok = self.tt.startStreamingMediaFileToChannel(out_path, vc)
+            if not ok:
+                self.send_pm(self._last_from or 0,
+                    "Failed to start streaming (missing USERRIGHT_TRANSMIT_MEDIAFILE_AUDIO?).")
+                self._cleanup_temp()
+                with self._playback_lock:
+                    self._current_playback_path = None
+                return
+            self._streaming = True
+        log.info("Started streaming audio file: %s", out_path)
 
     def _build_speech_line(self, text: str, voice: str, rate: float, pitch: float) -> str:
         """Build the STAR speech line: 'Voice: [[rate X]] [[pbas Y]] <text>'."""
@@ -673,23 +795,45 @@ class StarTeamTalkBot:
             return "SAPI4: rate/pitch are engine-specific numbers."
         return "Rate/pitch: numbers vary by voice -- try and listen."
 
+    def _find_voice(self, requested_name: str) -> str | None:
+        """Find a voice by name with fuzzy matching to handle typos."""
+        if not self.coag.connected:
+            return None
+        voices = self.coag.list_voices()
+        if not voices:
+            return None
+        voice_names = [v["name"] if isinstance(v, dict) else str(v) for v in voices]
+        requested_lower = requested_name.strip().lower()
+        for name in voice_names:
+            if name.lower() == requested_lower:
+                return name
+        matches = difflib.get_close_matches(requested_lower, [n.lower() for n in voice_names], n=1, cutoff=0.6)
+        if matches:
+            matched_lower = matches[0]
+            for name in voice_names:
+                if name.lower() == matched_lower:
+                    return name
+        return None
+
     def cmd_voice(self, arg, tm):
         user_id = tm.nFromUserID
         if not arg:
             voice = self._get_user_voice(user_id)
             self.send_pm(user_id, f"Current voice: {voice or '(none)'}.")
             return
-        if self._get_user_voice(user_id) and self._get_user_voice(user_id).lower() == arg.lower():
-            self.send_pm(user_id,
-                f"Voice already: {arg}. {self._voice_hint(arg)}")
+        matched_voice = self._find_voice(arg)
+        if not matched_voice:
+            self.send_pm(user_id, f"Voice '{arg}' not found. Use /voices to list available voices.")
             return
-        # Switching voices: reset rate/pitch to defaults. Rate/pitch values are
-        # tuned per-voice (e.g. Mac words/minute vs other engines' scales), so
-        # carrying an old voice's numbers into a new voice produces wrong speech.
-        self._set_user_voice(user_id, arg)
+        current_voice = self._get_user_voice(user_id)
+        if current_voice and current_voice.lower() == matched_voice.lower():
+            self.send_pm(user_id,
+                f"Voice already: {matched_voice}. {self._voice_hint(matched_voice)}")
+            return
+        self._set_user_voice(user_id, matched_voice)
         self.send_pm(user_id,
-            f"Voice set to: {arg}. Rate/pitch reset to defaults — set them again "
-            f"for this voice. {self._voice_hint(arg)}")
+            f"Voice set to: {matched_voice}. Rate/pitch reset to defaults — set them again "
+            f"for this voice. {self._voice_hint(matched_voice)}")
 
     def cmd_rate(self, arg, tm):
         user_id = tm.nFromUserID
@@ -739,6 +883,7 @@ class StarTeamTalkBot:
 
     def cmd_stop(self, arg, tm):
         with self._stream_lock:
+            was_streaming = self._streaming
             if self._streaming:
                 try:
                     self.tt.stopStreamingMediaFileToChannel()
@@ -746,9 +891,25 @@ class StarTeamTalkBot:
                     pass
                 self._streaming = False
                 self._cleanup_temp()
-                self.send_pm(tm.nFromUserID, "Stopped streaming.")
-            else:
-                self.send_pm(tm.nFromUserID, "Nothing is currently streaming.")
+            # Also clear playback queue and reset state
+            with self._playback_lock:
+                self._current_playback_path = None
+            # Drain the playback queue
+            while not self._playback_queue.empty():
+                try:
+                    wav_path, out_path = self._playback_queue.get_nowait()
+                    try:
+                        os.remove(wav_path)
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                    self._playback_queue.task_done()
+                except queue.Empty:
+                    break
+        if was_streaming:
+            self.send_pm(tm.nFromUserID, "Stopped streaming and cleared queue.")
+        else:
+            self.send_pm(tm.nFromUserID, "Nothing is currently streaming.")
 
     COMMANDS = {
         "/help": cmd_help,
@@ -760,40 +921,6 @@ class StarTeamTalkBot:
         "/pitch": cmd_pitch,
         "/stop": cmd_stop,
     }
-
-    # ---- audio streaming -------------------------------------------------
-    def _stream_audio(self, audio_bytes):
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=tempfile.gettempdir())
-        tmp.write(audio_bytes)
-        tmp.close()
-        wav_path = tmp.name
-        out_path = wav_path + ".stream.wav"
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", wav_path, "-ac", "1", "-ar", "44100", out_path],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            log.warning("ffmpeg transcode timed out; streaming original")
-            out_path = wav_path
-        except Exception as e:
-            log.warning("ffmpeg transcode failed (%s); streaming original", e)
-            out_path = wav_path
-
-        with self._stream_lock:
-            self._cleanup_temp()
-            self._temp_files = [wav_path, out_path]
-            vc = sdk.VideoCodec()
-            vc.nCodec = NOVIDEOFORMAT
-            ok = self.tt.startStreamingMediaFileToChannel(out_path, vc)
-            if not ok:
-                self.send_pm(self._last_from or 0,
-                    "Failed to start streaming (missing USERRIGHT_TRANSMIT_MEDIAFILE_AUDIO?).")
-                self._cleanup_temp()
-                return
-            self._streaming = True
-        log.info("Streaming %d-byte audio to channel.", len(audio_bytes))
 
     def _cleanup_temp(self):
         for f in self._temp_files:
